@@ -1,0 +1,269 @@
+---
+title: "Amazon_Review_Scraping"
+author: "Talin Sai Upputuri & Niharika Krothapalli"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(XML)
+library(tidyverse)
+library(RSentiment)
+library(dplyr)
+library(rvest)
+library(stringr)
+library(ggplot2)
+library(wordcloud)
+library(qdap)
+library(tidytext)
+library(textdata)
+library(tm)
+library(ggthemes)
+```
+
+Scraping the Website:-
+
+```{r}
+scrape_amazon <- function(ASIN, page_num){
+  
+  url <- paste0("http://www.amazon.com/product-reviews/",ASIN,"/?pageNumber=",page_num)
+  
+  product <- read_html(url) # Assign results to `elect`
+  
+  
+  #Product Title
+  product_title<-product %>% html_nodes("[class='a-size-base a-link-normal review-title a-color-base review-title-content a-text-bold']")%>% html_text() 
+  
+  # Product Text
+  product_text<- product %>% html_nodes("[class='a-size-base review-text review-text-content']")     %>% html_text()
+  
+  # Number of stars for the Product
+  product_stars<-product %>% html_nodes("[data-hook='review-star-rating']") %>% html_text() %>% str_extract("\\d") %>% as.numeric()
+  
+  product_helpful<- product %>% html_nodes("[class='a-size-base a-color-tertiary cr-vote-text']") %>% html_text() %>% gsub(" people.*"," ",.)
+  product_verified<- product %>% html_nodes("[data-hook='avp-badge']") %>% html_text() %>% grepl("Verified Purchase", .) %>%as.numeric()
+  review_date<-product %>% html_nodes("[data-hook='review-date']") %>% html_text() %>% gsub(".*on ", "", .)
+  length(product_helpful)<-length(product_title)
+  length(product_text)<-length(product_title)
+  length(product_stars)<-length(product_title)
+  length(product_verified)<-length(product_title)
+  length(review_date)<-length(product_title)
+  
+  scraped<-tibble(product_title,product_stars,review_date,product_verified,product_helpful,product_text) %>% return()
+}
+```
+Scraped the Website by finding the CSS selectors of the required fields
+Fields Taken:-
+Product Title
+Product Text
+Product Stars
+Product Helpful
+Product Verified
+Review Date
+
+
+```{r}
+pages<-20
+datalist<-list()
+for(page_num in 1:pages){
+  reviews <- scrape_amazon("B08PMP778K",page_num)
+  datalist[[page_num]] <- reviews
+  Sys.sleep(1.5)
+  
+}
+
+data=do.call(rbind,datalist)
+#data
+data$Id_number=seq(1:nrow(data))
+#data
+data<-data[, c(7,1,2,3,4,5,6)]
+data<-data %>%replace_na(list('product_verified'=0,'product_helpful'="0"))
+data['product_helpful'][data['product_helpful']=="One person found this helpful"]<-'1'
+data$product_helpful<-as.integer(data$product_helpful)
+data<-data %>% mutate(cleaned_date=str_replace_all(data$review_date,"[,'`$+]", ""))
+data$cleaned_date<- as.Date(data$cleaned_date,"%B %d %Y")
+data<-data[,c(1,2,3,8,5,6,7,4)]
+data<-data %>% select(-c(8))
+#data
+```
+Created a new Column Id_number for ease of identification
+Replaced NA values
+Converted the string format review date into Date Format
+
+```{r}
+senti_data<-data %>% select(Id_number,product_text)
+senti_data<-senti_data %>% mutate(
+  clean_text = tolower(product_text),
+ clean_text =removeWords(clean_text,stop_words$word),
+clean_text =str_replace_all(clean_text,"[,'`$+]", ""),
+clean_text =str_replace_all(clean_text,"[[:punct:]]", " "),
+clean_text =str_replace_all(clean_text,'[[:digit:]]+', " "),
+clean_text =str_replace_all(clean_text,"[[:space:]]+", " "),clean_text = trimws(clean_text)) 
+
+senti_data<- senti_data %>% select(Id_number,clean_text)
+#senti_data
+senti_data<-senti_data %>% group_by(Id_number) %>% unnest_tokens(word,clean_text)
+#senti_data
+
+
+
+affin_negative<-get_sentiments("afinn") %>% filter(value<0)
+affin_positive<-get_sentiments("afinn") %>% filter(value>0)
+bing_positive<-get_sentiments("bing") %>% filter(sentiment=="positive")
+bing_negative<-get_sentiments("bing") %>% filter(sentiment=="negative")
+```
+Cleaned the data replaced all punctuation digit space into empty.
+Used unnest_tokens by word on clean_text and grouped by Id_number
+
+
+```{r}
+senti_affin_negative<-senti_data %>% inner_join(affin_negative)
+#unique(data[senti_affin_negative$Id_number,] %>% group_by(product_stars)) %>% ggplot(aes(product_verified,product_helpful,color=product_stars))+geom_point()
+
+senti_affin_positive<-senti_data %>% inner_join(affin_positive)
+#senti_affin_positive
+
+
+senti_bing_positive<-senti_data%>% inner_join(bing_positive) %>% group_by(word) %>% count(sentiment,sort=TRUE)
+#senti_bing_positive
+senti_bing_negative<-senti_data%>% inner_join(bing_negative) %>% group_by(word) %>% count(sentiment)
+#senti_bing_negative
+```
+```{r}
+data%>% ggplot(aes(product_stars,product_helpful,color=product_verified))+geom_bar(stat="identity")+theme_solarized()+xlab("Product Stars")+ylab("Product Verified")+ggtitle("Verified Product")+theme(plot.title = element_text(hjust = 0.5))
+
+data%>% ggplot(aes(Id_number,cleaned_date,color=product_stars))+geom_line()+theme_solarized()+xlab("Product Stars")+ylab("Product Bought")+ggtitle("Item Bought and Rated")+theme(plot.title = element_text(hjust = 0.5))
+
+senti_data %>%
+  select(word)%>%
+  inner_join(get_sentiments('nrc'))%>%
+  group_by(sentiment)%>%
+    count()%>%
+      ggplot(aes(x=reorder(sentiment,X = n),y=n,color=sentiment))+geom_col()+guides(fill=F)+
+        coord_flip()+
+        theme_wsj()+xlab("Number of Sentiments")+ylab("NRC Sentiments")+ggtitle("Sentiments")+ theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+
+
+```{r}
+library(ggrepel) 
+plot_words_94_96 <- senti_data %>%
+  select(word)%>%
+  inner_join(get_sentiments('nrc'))%>%
+  group_by(sentiment) %>%
+  count(word, sort = TRUE) %>%
+  arrange(desc(n)) %>%
+  slice(seq_len(8)) %>% #consider top_n() from dplyr also
+  ungroup()
+
+plot_words_94_96 %>%
+  #Set `y = 1` to just plot one variable and use word as the label
+  ggplot(aes(word, 1, label = word, fill = sentiment )) +
+  #You want the words, not the points
+  geom_point(color = "transparent") +
+  #Make sure the labels don't overlap
+  geom_label_repel(force = 1,nudge_y = .5,  
+                   direction = "y",
+                   box.padding = 0.04,
+                   segment.color = "transparent",
+                   size = 3) +
+  facet_grid(~sentiment) +
+  theme(axis.text.y = element_blank(), axis.text.x = element_blank(),
+        axis.title.x = element_text(size = 6),
+        panel.grid = element_blank(), panel.background = element_blank(),
+        panel.border = element_rect("lightgray", fill = NA),
+        strip.text.x = element_text(size = 9)) +
+  xlab(NULL) + ylab(NULL) +
+  ggtitle("NRC Sentiment - Iphone 12 Pro Max Renewed") +
+  coord_flip()
+```
+
+
+
+```{r}
+x<-senti_data %>%  inner_join(get_sentiments("afinn")) %>% group_by(Id_number)
+x
+x %>% ggplot(aes(Id_number,value,color=value))+geom_bar(stat = "identity")+xlab("Each Review")+ylab("Affinity Scores")+ggtitle("Affinity Score for Each Review")+theme(plot.title = element_text(hjust = 0.5))+theme_solarized()
+```
+```{r}
+y<-senti_data %>% inner_join(get_sentiments("bing")) %>% group_by(word) %>% count(sentiment,sort=TRUE)
+y
+z<-senti_data %>% inner_join(get_sentiments("nrc")) %>% group_by(word) %>% count(sentiment,sort=TRUE)
+z
+y %>% ggplot(aes(sentiment,n,color=sentiment))+geom_bar(stat="identity")+ylab("Reviews")+ggtitle("Comparision between Positive and Negative Reviews")+theme_economist()
+```
+
+
+```{r}
+data['product_stars'] %>%summarize(average_rating = mean(product_stars), median_rating = median(product_stars))
+```
+```{r}
+ggplot(data['product_stars'],aes(x=product_stars))+
+  geom_bar(fill='sienna')+ xlab("Product Stars")+ylab("Number of People Rated")+ggtitle("Number of Stars rated")+theme(plot.title = element_text(hjust = 1)) +theme_economist()
+```
+
+
+
+
+```{r}
+most_common_word = freq_terms(text.var=senti_data$word,top=25,stopwords =
+                                c(Top200Words,"phone","iphone","apple","amazon","it's","product","i'm","phones"))
+  
+ggplot(most_common_word,aes(x = fct_reorder(WORD, FREQ, .desc=FALSE),y=FREQ))+
+  geom_bar(stat = "identity",fill = "steelblue")+
+  xlab("Word")+
+  ylab("Frequency")+
+  theme_solarized()+
+  coord_flip()
+```
+
+
+
+```{r}
+cloud<-data %>% select(Id_number,product_text)
+cloud_1<-cloud %>% mutate(
+  clean_text = tolower(product_text),
+ clean_text =removeWords(clean_text,stop_words$word),
+clean_text =str_replace_all(clean_text,"[,'`$+]", ""),
+clean_text =str_replace_all(clean_text,"[[:punct:]]", " "),
+clean_text =str_replace_all(clean_text,'[[:digit:]]+', " "),
+clean_text =str_replace_all(clean_text,"[[:space:]]+", " "),clean_text = trimws(clean_text))
+cloud_1
+words_se<-unique(cloud_1%>% unnest_tokens(word,clean_text)%>% count(word,sort=TRUE))
+
+
+ most_common_word
+words_se
+wordcloud::wordcloud(words=most_common_word$WORD,freq = most_common_word$FREQ,colors=brewer.pal(8, "Set2"))
+```
+
+
+
+```{r}
+wordcloudData2 = 
+  data%>%
+  select(product_text)%>%
+  unnest_tokens(output=word,input=product_text)%>%
+  anti_join(stop_words)%>%
+  inner_join(get_sentiments('bing'))%>%
+  count(sentiment,word,sort=T)%>%
+  spread(key=sentiment,value = n,fill=0)%>%
+  data.frame()
+rownames(wordcloudData2) = wordcloudData2[,'word']
+wordcloudData2 = wordcloudData2[,c('positive','negative')]
+
+set.seed(617)
+comparison.cloud(term.matrix = wordcloudData2,scale = c(1.5,0.5),max.words = 200, rot.per=0)
+```
+
+```{r}
+cloud_1 %>% unnest_tokens(word,clean_text) %>% group_by(Id_number)%>% inner_join(get_sentiments('nrc')) %>% count(sentiment,sort = TRUE)%>% ggplot(aes(Id_number,n,color=sentiment))+geom_line()+ggtitle("Product Review Sentiment Analysis") +theme(plot.title = element_text(hjust = 0.5)) +xlab("Id")+ylab("Sentiment")
+
+```
+
